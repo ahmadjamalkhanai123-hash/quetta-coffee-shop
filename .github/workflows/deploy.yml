@@ -10,6 +10,7 @@ env:
   ECR_REPOSITORY: quetta-coffee-shop
   ECS_CLUSTER:    quetta-coffee-shop-cluster
   ECS_SERVICE:    quetta-coffee-shop-service
+  TASK_FAMILY:    quetta-coffee-shop
 
 jobs:
   deploy:
@@ -28,7 +29,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # ── 3. Semgrep — SAST code scan ────────────────────────────────
+      # ── 3. Semgrep — SAST code scan (non-blocking) ─────────────────
       - name: Semgrep SAST scan
         uses: returntocorp/semgrep-action@v1
         continue-on-error: true
@@ -48,12 +49,10 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      # ── 6. Docker build ────────────────────────────────────────────
+      # ── 6. Docker build (SHA tag only — IMMUTABLE ECR) ─────────────
       - name: Build Docker image
         run: |
           docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:${{ github.sha }} .
-          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:${{ github.sha }} \
-                     $ECR_REGISTRY/$ECR_REPOSITORY:latest
 
       # ── 7. Trivy — CVE scan ────────────────────────────────────────
       - name: Trivy CVE scan
@@ -64,22 +63,46 @@ jobs:
           exit-code: 0
           severity: CRITICAL
 
-      # ── 8. Push to ECR ─────────────────────────────────────────────
+      # ── 8. Push SHA tag to ECR ─────────────────────────────────────
       - name: Push image to ECR
         run: |
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:${{ github.sha }}
-          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
 
-      # ── 9. Deploy to ECS ───────────────────────────────────────────
-      - name: Force ECS deployment
+      # ── 9. Register new ECS task definition with SHA image ─────────
+      - name: Update ECS task definition
+        id: task-def
+        run: |
+          IMAGE="$ECR_REGISTRY/$ECR_REPOSITORY:${{ github.sha }}"
+
+          CURRENT=$(aws ecs describe-task-definition \
+            --task-definition $TASK_FAMILY \
+            --query 'taskDefinition' \
+            --output json)
+
+          NEW_DEF=$(echo "$CURRENT" | jq \
+            --arg IMAGE "$IMAGE" \
+            '.containerDefinitions[0].image = $IMAGE |
+             del(.taskDefinitionArn, .revision, .status,
+                 .requiresAttributes, .placementConstraints,
+                 .compatibilities, .registeredAt, .registeredBy)')
+
+          NEW_ARN=$(aws ecs register-task-definition \
+            --cli-input-json "$NEW_DEF" \
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)
+
+          echo "task_arn=$NEW_ARN" >> $GITHUB_OUTPUT
+
+      # ── 10. Deploy new task definition to ECS ─────────────────────
+      - name: Deploy to ECS
         run: |
           aws ecs update-service \
             --cluster $ECS_CLUSTER \
             --service $ECS_SERVICE \
-            --force-new-deployment \
+            --task-definition ${{ steps.task-def.outputs.task_arn }} \
             --region $AWS_REGION
 
-      # ── 10. Wait for deployment ────────────────────────────────────
+      # ── 11. Wait for deployment to stabilize ──────────────────────
       - name: Wait for ECS to stabilize
         run: |
           aws ecs wait services-stable \
@@ -87,7 +110,8 @@ jobs:
             --services $ECS_SERVICE \
             --region $AWS_REGION
 
-      # ── 11. Done ───────────────────────────────────────────────────
+      # ── 12. Done ──────────────────────────────────────────────────
       - name: Deployment complete
         run: |
-          echo "Site live at: http://quetta-coffee-shop-alb-213486298.ap-south-1.elb.amazonaws.com"
+          echo "Image: $ECR_REGISTRY/$ECR_REPOSITORY:${{ github.sha }}"
+          echo "Site:  http://quetta-coffee-shop-alb-213486298.ap-south-1.elb.amazonaws.com"
