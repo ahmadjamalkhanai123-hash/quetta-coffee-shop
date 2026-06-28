@@ -1,0 +1,99 @@
+---
+- name: Configure ECS host
+  hosts: all
+  become: true
+
+  vars:
+    ecs_cluster_name: quetta-coffee-shop-cluster
+    region: ap-south-1
+
+  tasks:
+
+    - name: Ensure Docker is started and enabled
+      service:
+        name: docker
+        state: started
+        enabled: true
+
+    - name: Write ECS agent config
+      copy:
+        dest: /etc/ecs/ecs.config
+        content: |
+          ECS_CLUSTER={{ ecs_cluster_name }}
+          ECS_ENABLE_CONTAINER_METADATA=true
+          ECS_AVAILABLE_LOGGING_DRIVERS=["json-file","awslogs"]
+        mode: '0644'
+
+    - name: Restart ECS agent to apply config
+      service:
+        name: ecs
+        state: restarted
+        enabled: true
+
+    - name: Install CloudWatch agent via dnf
+      dnf:
+        name: amazon-cloudwatch-agent
+        state: present
+
+    - name: Write CloudWatch agent config
+      copy:
+        dest: /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
+        content: |
+          {
+            "agent": {
+              "metrics_collection_interval": 60,
+              "region": "{{ region }}"
+            },
+            "metrics": {
+              "namespace": "QuettaCoffeeShop",
+              "metrics_collected": {
+                "mem": {
+                  "measurement": ["mem_used_percent"]
+                },
+                "disk": {
+                  "measurement": ["disk_used_percent"],
+                  "resources": ["/"]
+                }
+              }
+            },
+            "logs": {
+              "logs_collected": {
+                "files": {
+                  "collect_list": [
+                    {
+                      "file_path": "/var/log/ecs/ecs-agent.log",
+                      "log_group_name": "/ecs/quetta-coffee-shop",
+                      "log_stream_name": "ecs-agent-{instance_id}"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        mode: '0644'
+
+    - name: Start CloudWatch agent
+      shell: |
+        /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+          -a fetch-config \
+          -m ec2 \
+          -s \
+          -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
+      args:
+        executable: /bin/bash
+
+    - name: Verify Docker is running
+      command: docker info
+      register: docker_info
+      changed_when: false
+
+    - name: Verify ECS agent is running
+      command: systemctl is-active ecs
+      register: ecs_status
+      changed_when: false
+
+    - name: Show status
+      debug:
+        msg:
+          - "Docker: {{ 'RUNNING' if docker_info.rc == 0 else 'FAILED' }}"
+          - "ECS Agent: {{ ecs_status.stdout | upper }}"

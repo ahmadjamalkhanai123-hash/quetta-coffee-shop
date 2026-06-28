@@ -1,0 +1,16 @@
+# Terraform
+terraform/.terraform/
+terraform/terraform.tfstate
+terraform/terraform.tfstate.backup
+terraform/.terraform.lock.hcl
+terraform/terraform.tfvars
+
+# SSH keys — never commit
+*.pem
+*.key
+
+# Ansible
+ansible/inventory.yml
+
+# OS
+.DS_Store
