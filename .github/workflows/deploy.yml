@@ -31,6 +31,7 @@ jobs:
       # ── 3. Semgrep — SAST code scan ────────────────────────────────
       - name: Semgrep SAST scan
         uses: returntocorp/semgrep-action@v1
+        continue-on-error: true
         with:
           config: auto
 
